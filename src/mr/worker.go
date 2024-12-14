@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io/ioutil"
-	"json"
 	"log"
 	"net/rpc"
 	"os"
 	"sort"
+	"strconv"
 	"time"
 )
 
@@ -38,24 +38,34 @@ func ihash(key string) int {
 // main/mrworker.go calls this function.
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
-
+	count := 0
 	// Your worker implementation here.
 
 	for {
-		filename, task, nReduce, taskNumber := RequestTask()
+		filename, task, nReduce, taskNumber, totalMap := RequestTask()
 		if task == "map" {
-			Map(mapf, nReduce, filename, taskNumber)
+			res := Map(mapf, nReduce, filename, taskNumber)
+			if res {
+				NotifyTaskComplete(filename, "map", taskNumber)
+			}
 		} else if task == "reduce" {
-			return
+			res := Reduce(reducef, taskNumber, totalMap)
+			if res {
+				NotifyTaskComplete(filename, "reduce", taskNumber)
+			}
 		} else {
-			fmt.Println("No task available, retrying in 5 seconds...")
+			count++
+			if count == 5 {
+				return
+			}
+			// fmt.Println("No task available, retrying in 5 seconds...")
 			time.Sleep(5 * time.Second) // Wait for 5 seconds before checking again
 		}
 	}
 
 }
 
-func Map(mapf func(string, string) []KeyValue, nReduce int, filename string, taskNumber int) {
+func Map(mapf func(string, string) []KeyValue, nReduce int, filename string, taskNumber int) bool {
 	file, err := os.Open(filename)
 	if err != nil {
 		log.Fatalf("cannot open %v", filename)
@@ -66,7 +76,6 @@ func Map(mapf func(string, string) []KeyValue, nReduce int, filename string, tas
 	}
 	file.Close()
 	kva := mapf(filename, string(content))
-	sort.Sort(ByKey(kva))
 	keyBuckets := make(map[string]int)
 	for _, kv := range kva {
 		key := kv.Key
@@ -77,13 +86,13 @@ func Map(mapf func(string, string) []KeyValue, nReduce int, filename string, tas
 		}
 	}
 
-	i := 0
-	for i < nReduce {
-		intermediateFilename := "mr-" + string(taskNumber) + "_" + string(i)
+	// print(taskNumber)
+	for i := 0; i < nReduce; i++ {
+		intermediateFilename := "mr-" + strconv.Itoa(taskNumber) + "-" + strconv.Itoa(i)
 		intermediateFile, err := os.Create(intermediateFilename)
 		if err != nil {
 			fmt.Println("Error creating file:", err)
-			return
+			return false
 		}
 		defer file.Close()
 		enc := json.NewEncoder(intermediateFile)
@@ -92,17 +101,65 @@ func Map(mapf func(string, string) []KeyValue, nReduce int, filename string, tas
 				err := enc.Encode(&kv)
 				if err != nil {
 					fmt.Println("Error encoding key value pair:", err)
-					return
+					return false
 				}
 			}
 		}
 	}
+	return true
+}
+
+func Reduce(reducef func(string, []string) string, reduceTaskNumber int, totalFiles int) bool {
+
+	intermediate := make([]KeyValue, 0)
+	for i := 0; i < totalFiles; i++ {
+		file := "mr-" + strconv.Itoa(i) + "-" + strconv.Itoa(reduceTaskNumber)
+		intermediateFile, err := os.Open(file)
+		if err != nil {
+			println("Error opening file %s ", file)
+			return false
+		}
+		dec := json.NewDecoder(intermediateFile)
+		for {
+			var kv KeyValue
+			if err := dec.Decode(&kv); err != nil {
+				break
+			}
+			intermediate = append(intermediate, kv)
+		}
+
+		sort.Sort(ByKey(intermediate))
+	}
+
+	// print(len(intermediate))
+	oname := "mr-out-" + strconv.Itoa(reduceTaskNumber)
+	ofile, _ := os.Create(oname)
+
+	defer ofile.Close()
+	i := 0
+	for i < len(intermediate) {
+		j := i + 1
+		for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
+			j++
+		}
+		values := []string{}
+		for k := i; k < j; k++ {
+			values = append(values, intermediate[k].Value)
+		}
+		output := reducef(intermediate[i].Key, values)
+		fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
+		i = j
+	}
+
+	println("reduce task completed for file %s", reduceTaskNumber)
+	return true
+
 }
 
 // example function to show how to make an RPC call to the master.
 //
 // the RPC argument and reply types are defined in rpc.go.
-func RequestTask() (string, string, int, int) {
+func RequestTask() (string, string, int, int, int) {
 
 	// declare an argument structure.
 	args := TaskRequestArgs{}
@@ -112,8 +169,9 @@ func RequestTask() (string, string, int, int) {
 
 	// send the RPC request, wait for the reply.
 	call("Master.TaskRequest", &args, &reply)
+	// print(reply.TaskNumber)
 
-	return reply.File, reply.Task, reply.NReduce, reply.TaskNumber
+	return reply.File, reply.Task, reply.NReduce, reply.TaskNumber, reply.MTasks
 
 }
 
@@ -125,7 +183,7 @@ func NotifyTaskComplete(file string, task string, taskNumber int) {
 	reply := TaskRequestReply{}
 
 	// send the RPC request, wait for the reply.
-	call("Master.WorkerResponse", &args, &reply)
+	call("Master.TaskComplete", &args, &reply)
 }
 
 // send an RPC request to the master, wait for the response.

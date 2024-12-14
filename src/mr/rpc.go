@@ -26,6 +26,7 @@ type TaskRequestReply struct {
 	NReduce    int
 	TaskNumber int
 	Task       string
+	MTasks     int
 }
 
 type TaskCompleteArgs struct {
@@ -36,6 +37,14 @@ type TaskCompleteArgs struct {
 }
 
 type TaskCompleteReply struct {
+}
+
+type TaskFailArgs struct {
+	TaskNumber int
+	Task       string
+}
+
+type TaskFailReply struct {
 }
 
 // Add your RPC definitions here.
